@@ -1,0 +1,13 @@
+{
+  "name": "health-service",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node index.js --test"
+  },
+  "dependencies": {
+    "express": "^4.22.2"
+  }
+}

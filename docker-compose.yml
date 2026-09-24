@@ -1,0 +1,134 @@
+version: "3.9"
+
+# Student Portal — core infrastructure pipeline
+# Bring everything up:  docker compose up -d
+# Tear down:            docker compose down -v
+# Scale a service:      docker compose up -d --scale auth-service=3
+
+networks:
+  portal-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  rabbitmq-data:
+
+services:
+
+  # ── Database ────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: portal-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-portal_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-student_portal}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    networks:
+      - portal-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-portal_admin}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Connection pooling (critical for 1,000 concurrent users) ─
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: portal-pgbouncer
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-portal_admin}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-student_portal}
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 2000
+      DEFAULT_POOL_SIZE: 50
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "6432:6432"
+    networks:
+      - portal-net
+
+  # ── Cache / session store ─────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: portal-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - portal-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Event bus ──────────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: portal-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-portal}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-changeme}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # Management UI
+    networks:
+      - portal-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ── API Gateway ────────────────────────────────────────────────
+  gateway:
+    image: traefik:v3.1
+    container_name: portal-gateway
+    restart: unless-stopped
+    command:
+      - "--api.insecure=true"          # dashboard at :8080 — disable before real deploy
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.endpoint=${DOCKER_ENDPOINT:-unix:///var/run/docker.sock}"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+      - "8080:8080"   # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - portal-net
+    # WINDOWS USERS: socket mounting above is unreliable on Docker Desktop
+    # for Windows. If `docker compose logs gateway` shows repeated
+    # "Error response from daemon" lines, see the Windows fix in README.md —
+    # it sets DOCKER_ENDPOINT in .env to override this without editing this file.
+
+  # ── Proof-of-pipeline health service ────────────────────────
+  # Confirms: code -> container -> gateway routing works end-to-end.
+  # Replace/extend with the real Auth Service in Week 1.
+  health-service:
+    build: ./services/health-service
+    container_name: portal-health
+    restart: unless-stopped
+    networks:
+      - portal-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.health.rule=PathPrefix(`/health`)"
+      - "traefik.http.services.health.loadbalancer.server.port=3000"
+    depends_on:
+      - gateway
