@@ -1,0 +1,49 @@
+# Prometheus scrape config for the Student Portal.
+#
+# Each service is discovered through Docker's DNS: the service name resolves to
+# one IP per replica, so every replica is scraped separately and new replicas
+# (docker compose --scale) are picked up automatically.
+
+global:
+  scrape_interval: 5s       # fine-grained enough to watch a load test live
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: auth-service
+    dns_sd_configs:
+      - names: ["auth-service"]
+        type: A
+        port: 3000
+        refresh_interval: 10s
+
+  - job_name: student-service
+    dns_sd_configs:
+      - names: ["student-service"]
+        type: A
+        port: 3000
+        refresh_interval: 10s
+
+  - job_name: dashboard-service
+    dns_sd_configs:
+      - names: ["dashboard-service"]
+        type: A
+        port: 3000
+        refresh_interval: 10s
+
+  - job_name: transcript-service
+    dns_sd_configs:
+      - names: ["transcript-service"]
+        type: A
+        port: 3000
+        refresh_interval: 10s
+
+  - job_name: pastpapers-service
+    dns_sd_configs:
+      - names: ["pastpapers-service"]
+        type: A
+        port: 3000
+        refresh_interval: 10s

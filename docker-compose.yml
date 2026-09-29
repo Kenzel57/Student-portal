@@ -1,4 +1,4 @@
-version: "3.9"
+version: "3.8"
 
 # Student Portal — core infrastructure pipeline
 # Bring everything up:  docker compose up -d
@@ -13,6 +13,8 @@ volumes:
   postgres-data:
   redis-data:
   rabbitmq-data:
+  pgadmin-data:
+  minio-data:
 
 services:
 
@@ -33,7 +35,10 @@ services:
     networks:
       - portal-net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-portal_admin}"]
+      # -d is required: without it pg_isready probes a database named after
+      # the user ("portal_admin"), which doesn't exist, and Postgres logs a
+      # FATAL error on every check.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-portal_admin} -d ${POSTGRES_DB:-student_portal}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -45,6 +50,16 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-portal_admin}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-student_portal}
+      # Listen on 6432 (the port every service's DATABASE_URL uses); the
+      # image's own default is 5432, which would silently break connections.
+      LISTEN_PORT: 6432
+      # Postgres 16 stores SCRAM passwords. With SCRAM here, PgBouncer uses
+      # portal_admin (auth_user) to look up each service role's password
+      # (auth_svc, student_svc, ...), so no per-role userlist is needed.
+      AUTH_TYPE: scram-sha-256
+      # Lets portal_admin open PgBouncer's admin console (the special
+      # "pgbouncer" database) to run SHOW POOLS / SHOW STATS.
+      ADMIN_USERS: ${POSTGRES_USER:-portal_admin}
       POOL_MODE: transaction
       MAX_CLIENT_CONN: 2000
       DEFAULT_POOL_SIZE: 50
@@ -55,6 +70,25 @@ services:
       - "6432:6432"
     networks:
       - portal-net
+
+  # ── Database admin UI (local dev only) ──────────────────────
+  # Browse the database at http://localhost:5050. Connect to host "postgres",
+  # port 5432 — the service name on portal-net, not localhost.
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: portal-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-changeme}
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin   # keeps saved server connections
+    ports:
+      - "5050:80"
+    networks:
+      - portal-net
+    depends_on:
+      - postgres
 
   # ── Cache / session store ─────────────────────────────────────
   redis:
@@ -96,7 +130,7 @@ services:
 
   # ── API Gateway ────────────────────────────────────────────────
   gateway:
-    image: traefik:v3.1
+    image: traefik:v3.6
     container_name: portal-gateway
     restart: unless-stopped
     command:
@@ -132,3 +166,224 @@ services:
       - "traefik.http.services.health.loadbalancer.server.port=3000"
     depends_on:
       - gateway
+
+  # ── Auth Service ─────────────────────────────────────────────
+  # Signup/login, JWT issuing & refresh, roles, password reset.
+  # No container_name: this service is scaled with --scale in the load test.
+  auth-service:
+    build: ./services/auth-service
+    restart: unless-stopped
+    environment:
+      # Through PgBouncer (6432), never Postgres directly (5432).
+      DATABASE_URL: postgres://auth_svc:auth_dev_pw@pgbouncer:6432/${POSTGRES_DB:-student_portal}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-dev_secret_change_me}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@portal.local}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-admin_dev_pw}
+      # bcrypt runs on libuv's thread pool. Keep replicas x threads roughly
+      # equal to the host's CPU count (3 x 4 = 12 here); more threads than
+      # cores only adds contention, not throughput.
+      UV_THREADPOOL_SIZE: ${AUTH_THREADPOOL_SIZE:-4}
+    deploy:
+      # Login is CPU-bound (bcrypt ~74 ms per check), so capacity comes from
+      # running several copies. Traefik load-balances across them automatically.
+      replicas: ${AUTH_REPLICAS:-3}
+    networks:
+      - portal-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.auth.rule=PathPrefix(`/auth`)"
+      - "traefik.http.routers.auth.entrypoints=web"
+      - "traefik.http.services.auth.loadbalancer.server.port=3000"
+    depends_on:
+      - gateway
+      - pgbouncer
+      - redis
+
+  # ── Student Service ──────────────────────────────────────────
+  # Profiles and enrolment records. Verifies JWTs locally (shared secret).
+  student-service:
+    build: ./services/student-service
+    restart: unless-stopped
+    environment:
+      # Through PgBouncer (6432), never Postgres directly (5432).
+      DATABASE_URL: postgres://student_svc:student_dev_pw@pgbouncer:6432/${POSTGRES_DB:-student_portal}
+      JWT_SECRET: ${JWT_SECRET:-dev_secret_change_me}
+    deploy:
+      # One Node process uses at most ~1 CPU core; the Part 2 load test
+      # saturated a single replica at ~500 VUs, so run three.
+      replicas: ${STUDENT_REPLICAS:-3}
+    networks:
+      - portal-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.student.rule=PathPrefix(`/student`)"
+      - "traefik.http.routers.student.entrypoints=web"
+      - "traefik.http.services.student.loadbalancer.server.port=3000"
+    depends_on:
+      - gateway
+      - pgbouncer
+
+  # ── Dashboard / BFF Service ──────────────────────────────────
+  # No database: validates the token via Auth, composes data from Student,
+  # caches the composed payload in Redis for a few seconds.
+  dashboard-service:
+    build: ./services/dashboard-service
+    restart: unless-stopped
+    environment:
+      AUTH_URL: http://auth-service:3000
+      STUDENT_URL: http://student-service:3000
+      REDIS_URL: redis://redis:6379
+    deploy:
+      # Same single-core limit as Student; it fans out 2-3 upstream calls per
+      # cache miss, so it saturated alongside Student in the Part 2 test.
+      replicas: ${DASHBOARD_REPLICAS:-3}
+    networks:
+      - portal-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=PathPrefix(`/dashboard`)"
+      - "traefik.http.routers.dashboard.entrypoints=web"
+      - "traefik.http.services.dashboard.loadbalancer.server.port=3000"
+    depends_on:
+      - gateway
+      - redis
+      - auth-service
+      - student-service
+
+  # ── Transcript Service ───────────────────────────────────────
+  # Grades, GPA, PDF transcripts (WeasyPrint). Publishes grade.posted events.
+  transcript-service:
+    build: ./services/transcript-service
+    restart: unless-stopped
+    environment:
+      # Through PgBouncer (6432), never Postgres directly (5432).
+      DATABASE_URL: postgres://transcript_svc:transcript_dev_pw@pgbouncer:6432/${POSTGRES_DB:-student_portal}
+      AMQP_URL: amqp://${RABBITMQ_USER:-portal}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672
+      JWT_SECRET: ${JWT_SECRET:-dev_secret_change_me}
+      STUDENT_URL: http://student-service:3000
+    deploy:
+      replicas: ${TRANSCRIPT_REPLICAS:-1}
+    networks:
+      - portal-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.transcript.rule=PathPrefix(`/transcript`)"
+      - "traefik.http.routers.transcript.entrypoints=web"
+      - "traefik.http.services.transcript.loadbalancer.server.port=3000"
+    depends_on:
+      gateway:
+        condition: service_started
+      pgbouncer:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+
+  # ── Past Papers Service ──────────────────────────────────────
+  # Upload/search/list/download past papers. Files in MinIO, metadata and a
+  # full-text search vector in Postgres. Publishes pastpaper.uploaded events.
+  pastpapers-service:
+    build: ./services/pastpapers-service
+    restart: unless-stopped
+    environment:
+      # Through PgBouncer (6432), never Postgres directly (5432).
+      DATABASE_URL: postgres://pastpapers_svc:pastpapers_dev_pw@pgbouncer:6432/${POSTGRES_DB:-student_portal}
+      AMQP_URL: amqp://${RABBITMQ_USER:-portal}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672
+      JWT_SECRET: ${JWT_SECRET:-dev_secret_change_me}
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_BUCKET: pastpapers
+      # Local dev uses the MinIO root account; in production give this
+      # service its own MinIO user limited to the pastpapers bucket.
+      MINIO_ACCESS_KEY: ${MINIO_USER:-portal_admin}
+      MINIO_SECRET_KEY: ${MINIO_PASSWORD:-changeme123}
+    deploy:
+      replicas: ${PASTPAPERS_REPLICAS:-1}
+    networks:
+      - portal-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pastpapers.rule=PathPrefix(`/pastpapers`)"
+      - "traefik.http.routers.pastpapers.entrypoints=web"
+      - "traefik.http.services.pastpapers.loadbalancer.server.port=3000"
+    depends_on:
+      gateway:
+        condition: service_started
+      pgbouncer:
+        condition: service_started
+      minio:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+
+  # ── Document storage (guide 3.2) ─────────────────────────────
+  # S3-compatible object storage for past-paper PDFs. API on :9000, web
+  # console on :9001 (log in with MINIO_USER / MINIO_PASSWORD).
+  minio:
+    # minio/minio no longer exists on Docker Hub (MinIO stopped publishing
+    # community images in late 2025). Chainguard builds the same open-source
+    # MinIO server from source; command, env, ports and volume are unchanged.
+    image: cgr.dev/chainguard/minio:latest
+    container_name: portal-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER:-portal_admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-changeme123}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - portal-net
+
+  # ── Frontend (React, served by nginx) ────────────────────────
+  # Catch-all route at the lowest priority: /auth, /student, /dashboard and
+  # /health keep going to their APIs; every other path serves the web app.
+  frontend:
+    build: ./services/frontend
+    container_name: portal-frontend
+    restart: unless-stopped
+    networks:
+      - portal-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.frontend.entrypoints=web"
+      - "traefik.http.routers.frontend.priority=1"
+      - "traefik.http.services.frontend.loadbalancer.server.port=80"
+    depends_on:
+      - gateway
+
+  # ── Monitoring (guide 2.3) ───────────────────────────────────
+  # Prometheus scrapes /metrics on every service replica (see
+  # monitoring/prometheus.yml); Grafana is pre-provisioned with Prometheus as
+  # its data source and the "Student Portal — Live" dashboard.
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: portal-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - portal-net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: portal-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3001:3000"
+    networks:
+      - portal-net
+    depends_on:
+      - prometheus

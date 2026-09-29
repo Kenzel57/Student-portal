@@ -1,0 +1,8 @@
+# Grafana loads every dashboard JSON in /var/lib/grafana/dashboards on startup.
+apiVersion: 1
+providers:
+  - name: student-portal
+    folder: Student Portal
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

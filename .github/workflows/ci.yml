@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [health-service]
+        service: [health-service, auth-service, student-service, dashboard-service, transcript-service, pastpapers-service, frontend]
         # Add each new service's folder name here as you build it, e.g.
         # service: [health-service, auth-service, student-service]
 
