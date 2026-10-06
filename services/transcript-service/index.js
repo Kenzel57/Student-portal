@@ -397,6 +397,11 @@ app.post("/transcript/grades", requireAuth, route(async (req, res) => {
     client.release();
   }
 
+  // The Notification Service has no database, so the event carries the
+  // student's contact email and name (best effort: null if the Student
+  // Service is unavailable or the profile has no contact email).
+  const profile = await fetchProfile(studentId, req.get("authorization"));
+
   // Published only after the commit, so no event is ever sent for a grade
   // that wasn't saved. (A transactional outbox would also guarantee the
   // reverse — no saved grade without an event — and is on the roadmap.)
@@ -407,6 +412,8 @@ app.post("/transcript/grades", requireAuth, route(async (req, res) => {
     institutionId,
     gradeId: saved.id,
     studentId,
+    studentEmail: profile?.contactEmail || null,
+    studentName: profile?.fullName || null,
     courseCode: saved.course_code,
     courseTitle: saved.course_title,
     grade: saved.grade,

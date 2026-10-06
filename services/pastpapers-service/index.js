@@ -256,6 +256,8 @@ app.post("/pastpapers/upload", requireAuth, requireStaff, upload, route(async (r
     semester: row.semester,
     tags: row.tags,
     uploadedBy: req.user.sub,
+    // Lets the Notification Service email the uploader without a database.
+    uploaderEmail: req.user.email || null,
   };
   let published = true;
   try {

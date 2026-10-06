@@ -461,3 +461,67 @@ Dashboard: http://localhost:8080/dashboard/ → HTTP → Routers → `health@doc
   - Swagger `/pastpapers/docs` 200; MinIO console :9001 200; Prometheus target up; all 5 service `/health` 200.
   - Frontend build OK (34 modules); the bundle contains the upload/search/list/download calls and UI.
 - **Not verified by me:** clicking through the pages in a real browser (no browser access). The user should check search, upload (as Bob) and download (as Carol) at http://localhost.
+
+### 2026-09-30 — Pushed to GitHub (branch `docker`)
+- **State before pushing:**
+  - The working tree was already clean. All work so far was in the user's local commit `368b285 "Services"` (61 files: every service, frontend, monitoring, load tests + results, Action.md, planning PDFs), 1 commit ahead of `origin/docker`.
+  - No rebase in progress. No `node_modules` or build output in the commit.
+- **Action:** `git push origin docker` → `9e05ba6..368b285 docker -> docker` on https://github.com/Kenzel57/Student-portal. The local branch is now in sync with `origin/docker`.
+- **Flagged, not changed:**
+  - The repo has **no `.gitignore`**, and **`.env` is tracked**. It was already on GitHub before this push and holds only local dev defaults, but `.env.example` itself says never to commit it.
+  - Recommended: add a `.gitignore` (`.env`, `node_modules/`, `dist/`) and `git rm --cached .env`. Also rotate any value in `.env` if it's ever changed to a real secret.
+- *(This entry was written after the push, so it will go out with the next commit.)*
+
+### 2026-09-30 — Wrote README.md
+- **Goal:** A project README for the GitHub repo, for examiners and developers.
+- **Action:** Created `README.md` covering:
+  - Status; architecture (Mermaid diagram, rendered by GitHub); service and endpoint tables; tech stack.
+  - Quick start; first-login steps (a fresh install has only the bootstrap admin; how to create lecturer/student/profile/enrolment via Swagger); local URLs with dev logins; repository layout.
+  - Key design decisions; load-testing commands and honest results so far; monitoring; CI; configuration table; Oracle Cloud deployment.
+  - Troubleshooting (including the real Traefik ≥ v3.6 cause of "Error response from daemon"); security notes; roadmap by tier.
+- **Left unchanged:** `README1.md` (the Week 1 pipeline README). It's now superseded, and its Windows section blames socket mounting rather than the Traefik version. Suggested deleting or archiving it.
+- **Defense notes:** The README documents *what was actually built*, including the load-test results that didn't pass and why. Guide 5.2 asks for "final diagram matching what you actually built, not the original plan."
+
+### 2026-09-30 — Built the Notification Service (guide 3.3) with Gmail SMTP
+- **Files created** (`services/notification-service/`):
+  - `package.json`: `amqplib`, `nodemailer`.
+  - `Dockerfile`: no EXPOSE; there is no HTTP route.
+  - `templates.js`: event → email.
+    - `grade.posted` goes to the student ("A new grade has been posted for [course]…"). The grade itself is deliberately *not* included, because email isn't a secure channel.
+    - `pastpaper.uploaded` goes to the **uploader**. **Deadline simplification, noted in a code comment:** there's no per-course enrolment model yet, so no roster of enrolled students to fan out to.
+    - All values are HTML-escaped.
+  - `index.js`: the consumer.
+    - nodemailer on `smtp.gmail.com:587`, `secure: false` (STARTTLS), auth = `GMAIL_USER` / `GMAIL_APP_PASSWORD`.
+    - **`transporter.verify()` must pass before consuming.** With missing or wrong credentials it logs, retries every 60 s and leaves events queued.
+    - Declares the exchange, queue and both bindings. `prefetch(5)`. **Manual ack only after SMTP accepts** (a crash means redelivery, not loss).
+    - 3 retries (1/3/9 s), then the message is parked in `notification.failed` with the error in the headers (poison-message handling; the existing queue can't gain a dead-letter argument without deleting it).
+    - In-memory de-duplication by `eventId` (last 1,000). Reconnects to RabbitMQ.
+    - `NOTIFICATION_REDIRECT_TO` (dev safety) sends all mail to one inbox, with the intended recipient in the subject.
+- **Files changed:**
+  - `transcript-service/index.js`: `grade.posted` now includes `studentEmail` (profile `contactEmail`) and `studentName`, looked up after the commit via the Student Service with the lecturer's token (best effort; null on failure).
+  - `pastpapers-service/index.js`: `pastpaper.uploaded` now includes `uploaderEmail` from the JWT.
+  - `docker-compose.yml`: `notification-service` (no Traefik labels, no ports; waits for RabbitMQ healthy).
+  - `.env.example`: `GMAIL_USER`, `GMAIL_APP_PASSWORD`, `NOTIFICATION_REDIRECT_TO` (empty placeholders).
+  - `ci.yml`: matrix.
+- **Verified:**
+  - With no Gmail credentials in `.env`, the service logs "not consuming; events stay queued". `notification.events` kept all 11 messages with 0 consumers.
+  - **Pipeline proven without Gmail using Mailpit** (a local SMTP catcher). A temporary consumer ran on a separate test queue `notification.test`, bound to both keys, so the real queue kept its copies.
+    - As Bob, posted grade ALG210 for Carol (201) and uploaded an ALG210 paper (201).
+    - The consumer logged `sent grade.posted … -> carol.mbah@mail.test | 250 … queued` and `sent pastpaper.uploaded … -> bob@staff.test | 250 … queued`. Both appeared in the Mailpit inbox with the expected subject and text. Event IDs matched the POST responses.
+  - Cleanup: the test consumer was stopped, the `notification.test` queue deleted (204) and Mailpit removed.
+  - `notification.events` now holds **13** messages, waiting for Gmail.
+- **Not yet verified:** real Gmail delivery. It needs the user's `GMAIL_USER` and App Password in `.env`.
+  - The 11 older events predate the email fields, so they have no recipient address. With `NOTIFICATION_REDIRECT_TO` set they go to that inbox ("[for no address on file]"); without it they're logged and skipped.
+- **Defense notes:**
+  - Events published while the Notification Service didn't exist were kept in a durable queue and will be delivered when it starts: temporal decoupling in practice.
+  - Ack-after-send plus retries plus a failed queue means at-least-once delivery with no infinite poison-message loop.
+
+### 2026-10-06 — Pushed remaining work to GitHub; added .gitignore, untracked .env
+- **Checked first:**
+  - `.env` was unchanged since the last commit (dev defaults only); no Gmail App Password in it.
+  - No `node_modules` / `dist` folders on disk.
+- **Added `.gitignore`:** `.env`, `node_modules/`, `dist/`, logs, OS clutter.
+- **Untracked `.env`** with `git rm --cached .env`. The local file is kept. Fresh clones use `cp .env.example .env`, as the README and CI already do. This prevents the Gmail App Password from ever being committed once it's added.
+  - Note: the dev-default `.env` remains in earlier commits' history. It only ever held dev defaults, so no rotation is needed.
+- **Committed and pushed** to `docker`: Notification Service; event email fields (Transcript, Past Papers); README; compose, CI and `.env.example` updates; Action.md entries since 2026-09-30.
+- **Left out on purpose:** an unrelated local edit to `services/health-service/package.json` (an accidental leading space before `{`). It's left unstaged and unchanged in the working tree.

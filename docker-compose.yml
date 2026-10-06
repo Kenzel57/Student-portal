@@ -316,6 +316,25 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  # ── Notification Service ─────────────────────────────────────
+  # No HTTP route, no database: consumes grade.posted / pastpaper.uploaded
+  # from RabbitMQ and sends email via Gmail SMTP. Stays idle (events remain
+  # queued) until GMAIL_USER / GMAIL_APP_PASSWORD are set in .env.
+  notification-service:
+    build: ./services/notification-service
+    restart: unless-stopped
+    environment:
+      AMQP_URL: amqp://${RABBITMQ_USER:-portal}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672
+      GMAIL_USER: ${GMAIL_USER:-}
+      GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD:-}
+      NOTIFICATION_REDIRECT_TO: ${NOTIFICATION_REDIRECT_TO:-}
+      PORTAL_URL: ${PORTAL_URL:-http://localhost}
+    networks:
+      - portal-net
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
   # ── Document storage (guide 3.2) ─────────────────────────────
   # S3-compatible object storage for past-paper PDFs. API on :9000, web
   # console on :9001 (log in with MINIO_USER / MINIO_PASSWORD).
