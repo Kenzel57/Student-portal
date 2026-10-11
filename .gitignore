@@ -1,0 +1,11 @@
+# Local secrets — copy .env.example to .env instead of committing it.
+.env
+
+# Dependencies and build output (rebuilt inside Docker images).
+node_modules/
+dist/
+
+# Logs and OS clutter.
+*.log
+.DS_Store
+Thumbs.db
