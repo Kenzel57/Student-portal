@@ -2,7 +2,6 @@
 
 A SaaS student portal built as independently deployable microservices behind an API gateway, designed to serve **1,000 concurrent students** (3,000 registered) without falling over.
 
-Final-year project, **Akwenwi Kenzel Che Niba**, ICT University, Yaoundé (delivery: 1 October 2026).
 
 > **Status:** six of the seven core services are built and running (Gateway, Auth, Student, Dashboard/BFF, Transcript, Past Papers). The Notification Service is next. Monitoring (Prometheus + Grafana), Swagger docs and a React frontend are in place. See [Roadmap](#roadmap).
 
@@ -363,10 +362,4 @@ Scope follows the project plan's tiers.
 
 **Post-deadline:** Fees & Payments (MTN MoMo / Orange Money sandbox), Admin/Institution multi-tenant management, Meilisearch, Reporting/Analytics.
 
----
 
-## Author
-
-**Akwenwi Kenzel Che Niba**, ICT University, Yaoundé. Final-year project, 2026.
-
-The full development history, with every change, test result, bottleneck found and design rationale, is in [Action.md](Action.md).
